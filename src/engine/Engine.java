@@ -2,6 +2,7 @@ package engine;
 
 import datakit.SinglyLinkedList;
 import graphicstructs.Mesh3D;
+import graphicstructs.Plane;
 import graphicstructs.Triangle3D;
 import mathkit.Matrix;
 import mathkit.Vector;
@@ -9,11 +10,14 @@ import mathkit.Vector;
 import javax.swing.JPanel;
 import java.awt.Color;
 import java.awt.Graphics;
-import java.awt.Graphics2D;
-import java.awt.RenderingHints;
 import java.awt.event.KeyAdapter;
 import java.awt.event.KeyEvent;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Timer;
 import java.util.TimerTask;
 
@@ -21,6 +25,8 @@ import java.util.TimerTask;
  * JPanel to calculate and render 3D Graphics
  */
 public class Engine extends JPanel {
+    // Vector Indices
+
     /**
      * Index of where the x value of a vector will be
      */
@@ -36,6 +42,8 @@ public class Engine extends JPanel {
      */
     private final int Z_INDEX = 2;
 
+    // Plane Defaults
+
     /**
      * Highest value visible in the z-plane of the 3D environment
      */
@@ -46,10 +54,46 @@ public class Engine extends JPanel {
      */
     private final double Z_NEAR = 0.1;
 
+    // Mesh and Triangle
+
     /**
-     * Amount of frames to run per second
+     * List of all meshes that exist
      */
-    private double frameRate;
+    private final ArrayList<Mesh3D> meshes;
+
+    /**
+     * List of triangles to convert to projected values to be rendered
+     */
+    private SinglyLinkedList<Triangle3D> trianglesToRender;
+
+    /**
+     * List of all triangles that are currently being rendered onto the canvas
+     */
+    private SinglyLinkedList<Triangle3D> trianglesBeingRendered;
+
+    /**
+     * Matrix to convert a 3D coordinate into a 2D point on the screen
+     */
+    private Matrix projMat;
+
+    // Rendering
+
+    /**
+     * Image taking up the whole screen
+     */
+    private BufferedImage canvas;
+
+    /**
+     * Container for colors for each pixel in the canvas
+     */
+    private int[] canvasRaster;
+
+    /**
+     * Container for the z-value of each pixel in the canvas
+     */
+    private double[] depthBuffer;
+
+    // Engine
 
     /**
      * Engine loop thread
@@ -61,20 +105,12 @@ public class Engine extends JPanel {
      */
     private TimerTask timerTask;
 
-    /**
-     * Matrix to convert a 3D coordinate into a 2D point on the screen
-     */
-    private Matrix projMat;
+    private Camera camera;
 
     /**
-     * List of all triangles that should be rendered onto screen
+     * Amount of frames to run per second
      */
-    private final SinglyLinkedList<Triangle3D> trianglesToRender;
-
-    /**
-     * List of all meshes that exist
-     */
-    private final ArrayList<Mesh3D> meshes;
+    private double frameRate;
 
     // Constructors
 
@@ -94,14 +130,16 @@ public class Engine extends JPanel {
             }
         };
 
+        camera = new Camera(.25, .25, .25, Math.toRadians(1));
         trianglesToRender = new SinglyLinkedList<>();
+        trianglesBeingRendered = new SinglyLinkedList<>();
         meshes = new ArrayList<>();
 
         initMeshes();
         setBackground(Color.BLACK);
         setForeground(Color.WHITE);
 
-        // keyboard communications
+        // keyboard communication
         addKeyListener(new KeyAdapter() {
             @Override
             public void keyPressed(KeyEvent e) {
@@ -110,13 +148,19 @@ public class Engine extends JPanel {
                 }
             }
         });
+        addKeyListener(camera);
     }
+
 
     // Initialization
 
     // Create all desired meshes here
     private void initMeshes() {
-        meshes.add(Mesh3D.cube(0, 0, 0,1.0));
+        try {
+            meshes.add(Mesh3D.createMeshFromFile(new File("res/models/Mountains.obj")));
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
     }
 
     /**
@@ -124,6 +168,9 @@ public class Engine extends JPanel {
      */
     public void start() {
         projMat = projectionMatrix(Math.PI / 2);
+        canvas = new BufferedImage(getWidth(), getHeight(), BufferedImage.TYPE_INT_RGB);
+        canvasRaster = ((DataBufferInt) canvas.getRaster().getDataBuffer()).getData();
+        depthBuffer = new double[canvasRaster.length];
         timer.scheduleAtFixedRate(timerTask, 0, (long) (1000 / frameRate));
         requestFocus();
     }
@@ -143,106 +190,190 @@ public class Engine extends JPanel {
      */
     @Override
     protected void paintComponent(Graphics g) {
-        super.paintComponent(g);
-        ((Graphics2D) g).setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+        Arrays.fill(canvasRaster, 0);
+        Arrays.fill(depthBuffer, Z_FAR);
 
-        // draw all triangles (triangles are already in projected form)
-        for (Triangle3D tri : trianglesToRender) {
-            fillTriangle(g, tri);
+        // fill all triangles (triangles are already in projected form)
+        for (Triangle3D tri : trianglesBeingRendered) {
+            fillTriangle(tri);
+        }
+
+        g.drawImage(canvas, 0, 0, null);
+    }
+
+    private void drawTriangle(Triangle3D projTri, Graphics g) {
+        Vector point1 = projTri.get(0);
+        Vector point2 = projTri.get(1);
+        Vector point3 = projTri.get(2);
+
+        g.drawLine((int) point1.get(X_INDEX), (int) point1.get(Y_INDEX),
+                (int) point2.get(X_INDEX), (int) point2.get(Y_INDEX));
+
+        g.drawLine((int) point2.get(X_INDEX), (int) point2.get(Y_INDEX),
+                (int) point3.get(X_INDEX), (int) point3.get(Y_INDEX));
+
+        g.drawLine((int) point3.get(X_INDEX), (int) point3.get(Y_INDEX),
+                (int) point1.get(X_INDEX), (int) point1.get(Y_INDEX));
+    }
+
+    // Fill a projected triangle with a scanline algorithm
+    // Accounts for depth buffering
+    private void fillTriangle(Triangle3D projTri) {
+        // sort the projected triangle by y values
+        Triangle3D sortedProjTri = getSortedTriByY(projTri);
+        Vector point1 = sortedProjTri.get(0);
+        Vector point2 = sortedProjTri.get(1);
+        Vector point3 = sortedProjTri.get(2);
+
+        int rgb = sortedProjTri.getColor().getRGB();
+        double avgZ = (point1.get(Z_INDEX) + point2.get(Z_INDEX) + point3.get(Z_INDEX)) / 3;
+
+        // scanline fill the upper sub triangle
+        int currY = (int) point1.get(Y_INDEX) + 1;
+        int point1X = (int) point1.get(X_INDEX);
+        int startRow = 0;
+        int endRow = 0;
+
+        double slopeA = (point2.get(X_INDEX) - point1.get(X_INDEX)) / (point2.get(Y_INDEX) - point1.get(Y_INDEX));
+        double slopeB = (point3.get(X_INDEX) - point1.get(X_INDEX)) / (point3.get(Y_INDEX) - point1.get(Y_INDEX));
+
+        while (currY <= point2.get(Y_INDEX)) {
+            int xStart = (int) (point1X + (startRow * slopeA));
+            int xEnd = (int) (point1X + (endRow * slopeB));
+
+            for (int currX = Math.min(xStart, xEnd); currX <= Math.max(xStart, xEnd); currX++) {
+                int screenIndex = currY * getWidth() + currX;
+
+                if (avgZ < depthBuffer[screenIndex]) {
+                    depthBuffer[screenIndex] = avgZ;
+                    canvasRaster[screenIndex] = rgb;
+                }
+            }
+
+            currY++;
+            startRow++;
+            endRow++;
+        }
+
+        // scanline fill the lower sub triangle
+        currY = (int) point2.get(Y_INDEX) + 1;
+        startRow = 0;
+        slopeA = (point3.get(X_INDEX) - point2.get(X_INDEX)) / (point3.get(Y_INDEX) - point2.get(Y_INDEX));
+        int point2X = (int) point2.get(X_INDEX);
+
+        while (currY <= point3.get(Y_INDEX)) {
+            int xStart = (int) (point2X + (startRow * slopeA));
+            int xEnd = (int) (point1X + (endRow * slopeB));
+
+            for (int currX = Math.min(xStart, xEnd); currX <= Math.max(xStart, xEnd); currX++) {
+                int screenIndex = currY * getWidth() + currX;
+
+                if (avgZ < depthBuffer[screenIndex]) {
+                    depthBuffer[screenIndex] = avgZ;
+                    canvasRaster[screenIndex] = rgb;
+                }
+            }
+
+            currY++;
+            startRow++;
+            endRow++;
         }
     }
 
-    // Draw a projected triangle (a 3D triangle that has its coordinates converted into 2D)
+    // Given a triangle, return a new triangle with the vectors sorted by ascending y value
+    private Triangle3D getSortedTriByY(Triangle3D triangle) {
+        int[] sortedTriVecIndices = new int[] {0, 1, 2};
 
-    private void drawTriangle(Graphics g, Triangle3D projTri) {
-        Vector point1 = projTri.get(0);
-        Vector point2 = projTri.get(1);
-        Vector point3 = projTri.get(2);
+        for (int i = 0; i < sortedTriVecIndices.length; i++) {
+            int j = i;
+            int temp = sortedTriVecIndices[j];
 
-        int x1 = (int) point1.get(X_INDEX);
-        int y1 = (int) point1.get(Y_INDEX);
+            while (j > 0 && triangle.get(temp).get(Y_INDEX) < triangle.get(sortedTriVecIndices[j - 1]).get(Y_INDEX)) {
+                sortedTriVecIndices[j] = sortedTriVecIndices[j - 1];
+                sortedTriVecIndices[j - 1] = temp;
+                j--;
+            }
+        }
 
-        int x2 = (int) point2.get(X_INDEX);
-        int y2 = (int) point2.get(Y_INDEX);
-
-        int x3 = (int) point3.get(X_INDEX);
-        int y3 = (int) point3.get(Y_INDEX);
-
-        g.drawLine(x1, y1, x2, y2);
-        g.drawLine(x2, y2, x3, y3);
-        g.drawLine(x3, y3, x1, y1);
-    }
-
-    // Fill a projected triangle (a 3D triangle that has its coordinates converted into 2D)
-    private void fillTriangle(Graphics g, Triangle3D projTri) {
-        g.setColor(projTri.getColor());
-        drawTriangle(g, projTri);
-
-        Vector point1 = projTri.get(0);
-        Vector point2 = projTri.get(1);
-        Vector point3 = projTri.get(2);
-
-        int[] xPoints = new int[] {(int) point1.get(X_INDEX), (int) point2.get(X_INDEX), (int) point3.get(X_INDEX)};
-        int[] yPoints = new int[] {(int) point1.get(Y_INDEX), (int) point2.get(Y_INDEX), (int) point3.get(Y_INDEX)};
-
-        g.fillPolygon(xPoints, yPoints, 3);
+        return new Triangle3D(
+                triangle.get(sortedTriVecIndices[0]),
+                triangle.get(sortedTriVecIndices[1]),
+                triangle.get(sortedTriVecIndices[2]),
+                triangle.getColor()
+        );
     }
 
     // Update
 
     // Perform all actions for the engine each frame
     private void update() {
-        trianglesToRender.clear();
+        camera.update();
 
+        trianglesToRender = new SinglyLinkedList<>();
         cullTrianglesFromMeshes();
         projectAndScaleTriangles();
+        clipTrianglesToRender();
+
+        trianglesBeingRendered = trianglesToRender;
         repaint();
     }
 
-    // Add copies of the triangles from our meshes to the triangles to be rendered
+    // Add transformed triangles to the list of triangles to be rendered if valid
     private void cullTrianglesFromMeshes() {
-        double rotationAngle = Math.toRadians(System.currentTimeMillis() / frameRate);
+        Vector lightDirection = new Vector(1, 1, -1).normalized(); // magic
+        Matrix worldMat = Matrix.identityMatrix(3);
+        Vector translationVec = new Vector(0, 0, 20); // magic
 
-        Vector camera = new Vector(0, 0, 0);
-        Vector lightDirection = new Vector(0, 0, -1).normalized();
-        Matrix worldMatrix = zRotationMatrix(rotationAngle).multiplyMatrix(xRotationMatrix(rotationAngle / 2));
-        Vector translationVector = new Vector(0, 0, 3);
+        // transform world relative to camera movement
+        Matrix viewMatrix = camera.getPointAtMat().getTransposed();
+        Vector viewVec = camera.getWorldPos().multiplyMatrix(viewMatrix).multiplyByScalar(-1.0);
+
+        Plane nearPlane = new Plane(new Vector(0, 0, Z_NEAR), new Vector(0, 0, -1));
 
         for (Mesh3D mesh : meshes) {
             for (Triangle3D tri : mesh) {
-                // transform the mesh's triangle
-                Vector[] transformedVertices = new Vector[Triangle3D.SIZE];
-                for (int i = 0; i < transformedVertices.length; i++) {
-                    transformedVertices[i] = tri.get(i).multiplyMatrix(worldMatrix).add(translationVector);
-                }
+                // transform triangle in world space
+                Triangle3D transformedTri = transformTriangle(tri, worldMat, translationVec);
 
-                Triangle3D transformedTri = new Triangle3D(
-                        transformedVertices[0],
-                        transformedVertices[1],
-                        transformedVertices[2],
-                        tri.getColor()
-                );
-
-                // cull the triangle
+                // apply lighting to triangle
+                // cull based on if the triangle won't be seen
                 Vector triSurfNorm = transformedTri.getSurfaceNormal();
-                Vector triCamLine = transformedTri.get(0).subtract(camera);
+                Vector triCamLine = transformedTri.get(0).subtract(camera.getWorldPos());
                 double surfNormCamDiff = triSurfNorm.dotProduct(triCamLine);
 
                 if (surfNormCamDiff < 0.0) {
                     double shadingValue = triSurfNorm.dotProduct(lightDirection);
+
+                    if (shadingValue < 0) {
+                        shadingValue = 0;
+                    } else if (shadingValue > 1) {
+                        shadingValue = 1;
+                    }
+
                     transformedTri.setShading(shadingValue);
-                    trianglesToRender.add(transformedTri);
+                    transformedTri = transformTriangle(transformedTri, viewMatrix, viewVec);
+                    trianglesToRender.addAll(clipTriangleAgainstPlane(transformedTri, nearPlane));
                 }
             }
         }
     }
 
-    // Convert all 3D points into 2D points to be rendered onto the screen
+    // Transform a triangle given a rotation and scaling matrix and a translation vector
+    private Triangle3D transformTriangle(Triangle3D tri, Matrix rotAndScaleMat, Vector translationVec) {
+        Vector[] transformedVertices = new Vector[Triangle3D.SIZE];
+        for (int i = 0; i < transformedVertices.length; i++) {
+            Vector currVec = tri.get(i);
+            transformedVertices[i] = currVec.multiplyMatrix(rotAndScaleMat).add(translationVec);
+        }
+
+        return new Triangle3D(transformedVertices[0], transformedVertices[1], transformedVertices[2], tri.getColor());
+    }
+
+    // Convert all vertices of a triangle from world space to screen space
     private void projectAndScaleTriangles() {
-        for (Triangle3D tri : trianglesToRender) {
-            for (int i = 0; i < Triangle3D.SIZE; i++) {
+        for (Triangle3D tri : trianglesToRender) { // iterate through all triangles
+            for (int i = 0; i < Triangle3D.SIZE; i++) { // iterate through each vertex of the triangle
                 // project the 3D coordinate to 2D
-                // normalized x and y are now between -1 and 1
                 Vector currVector = tri.get(i);
                 double z = currVector.get(Z_INDEX);
                 double newZ = (z - Z_NEAR) * projMat.get(2, 2);
@@ -252,8 +383,8 @@ public class Engine extends JPanel {
                 Vector normalizedVector = currVector.divideByScalar(z);
 
                 // scale the normalized coordinates to pixel values on the screen
-                double newX = (normalizedVector.get(X_INDEX) + 1.0) * getWidth() / 2.0;
-                double newY = (normalizedVector.get(Y_INDEX) + 1.0) * getHeight() / 2.0;
+                double newX = (-normalizedVector.get(X_INDEX) + 1.0) * getWidth() / 2.0;
+                double newY = (-normalizedVector.get(Y_INDEX) + 1.0) * getHeight() / 2.0;
 
                 normalizedVector.set(X_INDEX, newX);
                 normalizedVector.set(Y_INDEX, newY);
@@ -263,54 +394,96 @@ public class Engine extends JPanel {
         }
     }
 
-    // Calculations
+    private void clipTrianglesToRender() {
+        Plane[] planes = {
+                new Plane(new Vector(0, 0, 0), new Vector(0, -1, 0)), // top plane
+                new Plane(new Vector(0, getHeight() - 1, 0), new Vector(0, 1, 0)), // bottom plane
 
-    // Generate a matrix to rotate the x coordinate of a 3D point
-    private Matrix xRotationMatrix(double angleRadians) {
-        Matrix rotationMatrix = new Matrix(3, 3);
+                new Plane(new Vector(0, 0, 0), new Vector(-1, 0, 0)), // left plane
+                new Plane(new Vector(getWidth() - 1, 0, 0), new Vector(1, 0, 0)) // right plane
+        };
 
-        double cosOfAngle = Math.cos(angleRadians);
-        double sinOfAngle = Math.sin(angleRadians);
+        SinglyLinkedList<Triangle3D> clippedTrisToRender = new SinglyLinkedList<>();
 
-        rotationMatrix.set(0, 0, 1.0);
-        rotationMatrix.set(1, 1, cosOfAngle);
-        rotationMatrix.set(1, 2, sinOfAngle);
-        rotationMatrix.set(2, 1, -sinOfAngle);
-        rotationMatrix.set(2, 2, cosOfAngle);
+        for (Triangle3D triToRender : trianglesToRender) {
+            SinglyLinkedList<Triangle3D> triQueue = new SinglyLinkedList<>();
+            triQueue.add(triToRender);
 
-        return rotationMatrix;
+            for (Plane plane : planes) {
+                int queueSize = triQueue.size();
+
+                while (queueSize > 0) {
+                    Triangle3D triToClip = triQueue.removeFirst();
+                    triQueue.addAll(clipTriangleAgainstPlane(triToClip, plane));
+                    queueSize--;
+                }
+            }
+
+            clippedTrisToRender.addAll(triQueue);
+        }
+
+        trianglesToRender = clippedTrisToRender;
     }
 
-    // Generate a matrix to rotate the y coordinate of a 3D point
-    private Matrix yRotationMatrix(double angleRadians) {
-        Matrix rotationMatrix = new Matrix(3, 3);
+    // Generate a list of new clipped triangles given an original triangle and a plane to clip against
+    private SinglyLinkedList<Triangle3D> clipTriangleAgainstPlane(Triangle3D tri, Plane plane) {
+        SinglyLinkedList<Triangle3D> clippedTris = new SinglyLinkedList<>();
+        SinglyLinkedList<Vector> insideVertices = new SinglyLinkedList<>();
+        SinglyLinkedList<Vector> outsideVertices = new SinglyLinkedList<>();
 
-        double cosOfAngle = Math.cos(angleRadians);
-        double sinOfAngle = Math.sin(angleRadians);
+        for (Vector vertex : tri) {
+            double distFromPlane = plane.distanceFromPoint(vertex);
 
-        rotationMatrix.set(0, 0, cosOfAngle);
-        rotationMatrix.set(0, 2, sinOfAngle);
-        rotationMatrix.set(2, 0, -sinOfAngle);
-        rotationMatrix.set(1, 1, 1.0);
-        rotationMatrix.set(2, 2, cosOfAngle);
+            if (distFromPlane <= 0.0) {
+                insideVertices.add(vertex);
+            } else {
+                outsideVertices.add(vertex);
+            }
+        }
 
-        return rotationMatrix;
-    }
+        if (insideVertices.size() == 1) {
+            Vector insideVec = insideVertices.getFirst();
+            Vector outsideVec1 = outsideVertices.getFirst();
+            Vector outsideVec2 = outsideVertices.getLast();
 
-    // Generate a matrix to rotate the z coordinate of a 3D point
-    private Matrix zRotationMatrix(double angleRadians) {
-        Matrix rotationMatrix = new Matrix(3, 3);
+            Vector intersectPoint1 = plane.lineIntersectPlanePoint(insideVec, outsideVec1);
+            Vector intersectPoint2 = plane.lineIntersectPlanePoint(insideVec, outsideVec2);
 
-        double cosOfAngle = Math.cos(angleRadians);
-        double sinOfAngle = Math.sin(angleRadians);
+            Vector[] vertices = new Vector[3];
+            vertices[0] = insideVec;
+            vertices[1] = intersectPoint1;
+            vertices[2] = intersectPoint2;
 
-        rotationMatrix.set(0, 0, cosOfAngle);
-        rotationMatrix.set(0, 1, sinOfAngle);
-        rotationMatrix.set(1, 0, -sinOfAngle);
-        rotationMatrix.set(1, 1, cosOfAngle);
-        rotationMatrix.set(2, 2, 1.0);
+            Triangle3D clippedTri = new Triangle3D(vertices[0], vertices[1], vertices[2], tri.getColor());
+            clippedTris.add(clippedTri);
+        } else if (insideVertices.size() == 2) {
+            Vector insideVec1 = insideVertices.getFirst();
+            Vector insideVec2 = insideVertices.getLast();
+            Vector outsideVec = outsideVertices.getFirst();
 
-        return rotationMatrix;
+            Vector intersectPoint1 = plane.lineIntersectPlanePoint(insideVec1, outsideVec);
+            Vector intersectPoint2 = plane.lineIntersectPlanePoint(insideVec2, outsideVec);
+
+            Vector[] vertices1 = new Vector[3];
+            vertices1[0] = insideVec1;
+            vertices1[1] = insideVec2;
+            vertices1[2] = intersectPoint1;
+
+            Vector[] vertices2 = new Vector[3];
+            vertices2[0] = intersectPoint1;
+            vertices2[1] = insideVec2;
+            vertices2[2] = intersectPoint2;
+
+            Triangle3D clippedTri1 = new Triangle3D(vertices1[0], vertices1[1], vertices1[2], tri.getColor());
+            Triangle3D clippedTri2 = new Triangle3D(vertices2[0], vertices2[1], vertices2[2], tri.getColor());
+
+            clippedTris.add(clippedTri1);
+            clippedTris.add(clippedTri2);
+        } else if (insideVertices.size() == 3) {
+            clippedTris.add(tri);
+        }
+
+        return clippedTris;
     }
 
     // Generate a projection matrix based on a field of view

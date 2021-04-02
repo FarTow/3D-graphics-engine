@@ -3,7 +3,11 @@ package graphicstructs;
 import datakit.SinglyLinkedList;
 import mathkit.Vector;
 
+import java.io.*;
+import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
+import java.util.Scanner;
 
 /**
  * Structure to store triangles in a 3D space as a mesh
@@ -28,6 +32,13 @@ public class Mesh3D implements Iterable<Triangle3D> {
         con = new SinglyLinkedList<>(triangles);
     }
 
+    public Mesh3D(SinglyLinkedList<Triangle3D> triList) {
+        if (triList == null) {
+            throw new IllegalArgumentException("Cannot create a mesh from a null list");
+        }
+
+        con = triList;
+    }
 
     // Statics Constructors
 
@@ -97,6 +108,48 @@ public class Mesh3D implements Iterable<Triangle3D> {
      */
     public static Mesh3D cube(double x, double y, double z, double length) {
         return rectangularPrism(x, y, z, length, length, length);
+    }
+
+    public static Mesh3D createMeshFromFile(File file) throws IOException {
+        if (file == null) {
+            throw new IllegalArgumentException("Cannot make a mesh from a null file");
+        }
+
+        try (BufferedReader fileReader = new BufferedReader(new FileReader(file))) {
+            List<Vector> vecList = new ArrayList<>();
+            SinglyLinkedList<Triangle3D> triList = new SinglyLinkedList<>();
+
+            String line = fileReader.readLine();
+
+            while (line != null) {
+                if (!line.isEmpty()) {
+                    Scanner lineScanner = new Scanner(line);
+
+                    switch (lineScanner.next()) {
+                        case "v":
+                            double xCoord = lineScanner.nextDouble();
+                            double yCoord = lineScanner.nextDouble();
+                            double zCoord = lineScanner.nextDouble();
+
+                            Vector newVec = new Vector(xCoord, yCoord, zCoord);
+                            vecList.add(newVec);
+                            break;
+                        case "f":
+                            Vector firstVec = vecList.get(lineScanner.nextInt() - 1);
+                            Vector secondVec = vecList.get(lineScanner.nextInt() - 1);
+                            Vector thirdVec = vecList.get(lineScanner.nextInt() - 1);
+
+                            Triangle3D newTri = new Triangle3D(firstVec, secondVec, thirdVec);
+                            triList.add(newTri);
+                            break;
+                    }
+                }
+
+                line = fileReader.readLine();
+            }
+
+            return new Mesh3D(triList);
+        }
     }
 
     // Getters

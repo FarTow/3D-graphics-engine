@@ -208,4 +208,5 @@ public class Triangle3D implements Iterable<Vector> {
     public Iterator<Vector> iterator() {
         return Arrays.stream(con).iterator();
     }
+
 }

@@ -13,7 +13,9 @@ import java.awt.event.WindowEvent;
  */
 class Manager extends JFrame {
     public static final Dimension SCREEN_SIZE = Toolkit.getDefaultToolkit().getScreenSize();
+
     private static final double DEFAULT_FRAME_RATE = 60.0;
+
     private final Engine engine;
 
     // Constructors
